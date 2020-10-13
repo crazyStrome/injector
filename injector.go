@@ -14,10 +14,10 @@ import (
 
 func init() {
 	// log.SetFormatter(&log.JSONFormatter{})
-	log.SetFormatter(&log.TextFormatter{
-		DisableColors: true,
-		FullTimestamp: true,
-	})
+	// log.SetFormatter(&log.TextFormatter{
+	// 	DisableColors: true,
+	// 	FullTimestamp: true,
+	// })
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 	//设置output,默认为stderr,可以为任何io.Writer，比如文件*os.File
 	logrus.SetOutput(os.Stdout)
@@ -43,14 +43,20 @@ var (
 
 	// ErrWrongParameter is a error reprents a func didn't have right parms
 	ErrWrongParameter = errors.New("wrong parameters: beanName or beanType is needed")
+
+	// ErrNoSuchBeanRegisted presents the bean isn't registed before
+	ErrNoSuchBeanRegisted = errors.New("no such bean is registed before")
+
+	// ErrBeanExists presents the bean is registed before
+	ErrBeanExists = errors.New("already registed the bean")
 )
 
-type beanDefination struct {
-	beanType  reflect.Type
-	beanFunc  func() interface{}
-	beanName  string
-	beanScope Scope
-}
+// type beanDefination struct {
+// 	beanType  reflect.Type
+// 	beanFunc  func() interface{}
+// 	beanName  string
+// 	beanScope Scope
+// }
 
 // Container is the container for depency inject
 type Container struct {
@@ -66,13 +72,19 @@ type Container struct {
 // NewContainer return a new container
 func NewContainer() *Container {
 	return &Container{
-		singletonBeans:      make(map[string]interface{}),
+		// beans already created and populated
+		singletonBeans: make(map[string]interface{}),
+		// beans already created but didn't be populated
 		earlySingletonBeans: make(map[string]interface{}),
-		singletonFactories:  make(map[string]func() interface{}),
+		// bean factory, need to be created
+		singletonFactories: make(map[string]func() interface{}),
 
-		singletonInCreation:     make(map[string]bool),
+		// marker for the beans created totally
+		singletonInCreation: make(map[string]bool),
+		// marker for the beans in population
 		singletonAlreadyCreated: make(map[string]bool),
 
+		// marker for population in field counting
 		populatedSingletonField: make(map[string]map[string]bool),
 	}
 }
@@ -103,13 +115,14 @@ func (con *Container) getSingleton(beanName string, beanType reflect.Type) (bean
 		// removed from earlySingletonBeans
 		// and add to singletonBeans
 		log.Infof("getSinglton: %s is get from earlySingletonBeans\n", beanName)
-		return bean, nil
+		return bean, ErrBeanLoadNotTotal
 	}
 	beanFunc, ok := con.singletonFactories[beanName]
 	if !ok {
 		log.Errorf("getSinglton: %s didn't exists in container\n", beanName)
 		return nil, errors.New("no such bean registed, beanName:" + beanName)
 	}
+
 	bean = beanFunc()
 	delete(con.singletonFactories, beanName)
 	con.singletonInCreation[beanName] = true
@@ -149,39 +162,73 @@ func (con *Container) addSingleton(beanName string, beanFunc func() interface{})
 	if beanName == "" {
 		beanName = getBeanNameByType(reflect.TypeOf(beanFunc()))
 	}
-	if _, ok := con.singletonFactories[beanName]; ok {
-		return errors.New("already registed the bean:" + beanName)
+	// TODO
+	// add a type assert
+	// if beanFunc can't produce a *struct type, return error
+	// DONE
+	var bean = beanFunc()
+	var beanType = reflect.TypeOf(bean)
+	if beanType.Kind() != reflect.Ptr || beanType.Elem().Kind() != reflect.Struct {
+		log.Printf("addSingleton: beanFunc must return *struct")
+		return ErrWrongParameter
 	}
+
+	if _, ok := con.singletonFactories[beanName]; ok {
+		return ErrBeanExists
+	}
+
 	con.singletonFactories[beanName] = beanFunc
-	log.Infof("addSingleton: %s --- %s is add to container\n", beanName, reflect.TypeOf(beanFunc))
-	log.Infoln("addSingleton: ", con)
+	log.Infof("addSingleton: bean named '%s' with beanFunc '%s' is add to container\n", beanName, reflect.TypeOf(beanFunc))
+	log.Infoln("addSingleton: the maps of container", con)
 	return nil
 }
 
 // GetBeanByName is used for get bean
 func (con *Container) GetBeanByName(beanName string) (interface{}, error) {
-	return con.getSingletonBeanByName(beanName)
+	var bean, err = con.getSingletonBeanByName(beanName)
+	if err != nil && err == ErrBeanLoadNotTotal {
+		con.populateSingleton(beanName)
+	}
+	if con.singletonAlreadyCreated[beanName] {
+		return bean, nil
+	}
+	return bean, ErrBeanLoadNotTotal
 }
 
 // this func is used for get bean by name
+// @params beanName: the name of bean to be found
+// @return interface{}: the bean found
+//			error: if didn't have the bean, return ErrNoSuchBeanRegisted
+//				   if didn't initailization totally, return ErrBeanLoadNotTotal
 func (con *Container) getSingletonBeanByName(beanName string) (interface{}, error) {
-	var bean, err = con.getSingleton(beanName, nil)
-	if err != nil {
-		return nil, err
-	}
+	// if the bean is in the cache, return directly
 	if con.singletonAlreadyCreated[beanName] {
-		log.Infof("getSingletonBeanByName: this bean named %s is already created\n", beanName)
+		log.Infof("getSingletonBeanByName: this bean named '%s' is already created\n", beanName)
+		var bean, _ = con.getSingleton(beanName, nil)
 		return bean, nil
 	}
-	// con.
-	log.Infof("getSingletonBeanByName: this bean named %s is in creation\n", beanName)
-	con.singletonInCreation[beanName] = true
+
+	if con.singletonInCreation[beanName] {
+		log.Infof("getSingletonBeanByName: this bean named '%s' is in creation\n", beanName)
+		var bean, _ = con.getSingleton(beanName, nil)
+		return bean, ErrBeanLoadNotTotal
+	}
+
+	// if the bean didn't registe in container, as didn't be in factory
+	// return error
+	if _, ok := con.singletonFactories[beanName]; !ok {
+		return nil, ErrNoSuchBeanRegisted
+	}
+	// first initialization
+	var bean, _ = con.getSingleton(beanName, nil)
+
+	// bean population
 	con.populateSingleton(beanName)
 	if con.singletonAlreadyCreated[beanName] {
-		log.Infof("getSingletonBeanByName: after population, this bean named %s is alread created\n", beanName)
+		log.Infof("getSingletonBeanByName: after population, this bean named '%s' is alread created\n", beanName)
 		return bean, nil
 	}
-	log.Errorf("getSingletonBeanByName: this bean named %s is in creation, not load totally, but returns as result\n", beanName)
+	log.Infof("getSingletonBeanByName: this bean named '%s' is in creation, not load totally, but returns as result\n", beanName)
 	return bean, ErrBeanLoadNotTotal
 }
 
@@ -192,25 +239,29 @@ func (con *Container) getSingletonBeanByName(beanName string) (interface{}, erro
 // b would be load to a as a object of A
 func (con *Container) populateSingleton(beanName string) {
 	// if
-	if con.singletonAlreadyCreated[beanName] {
-		return
-	}
+	// if con.singletonAlreadyCreated[beanName] {
+	// 	return
+	// }
 	if _, ok := con.populatedSingletonField[beanName]; !ok {
 		con.populatedSingletonField[beanName] = make(map[string]bool)
 	}
 	var bean, _ = con.getSingleton(beanName, nil)
+
 	var beanType = reflect.TypeOf(bean).Elem()
 	var beanValue = reflect.ValueOf(bean).Elem()
 
 	var populateSum = beanType.NumField()
 	// var populatesCount = 0
 
+	log.Infof("populateSingleton: bean '%s' of type '%v' is being populated\n", beanName, beanType)
+
 	for i := 0; i < populateSum; i++ {
 
 		var fieldName = beanType.Field(i).Name
 		var fieldType = beanType.Field(i).Type
+
 		var fieldValue = beanValue.Field(i)
-		log.Infof("populateSingleton: populate field %s from bean %s\n", fieldName, beanName)
+		log.Infof("populateSingleton: populate field '%s' from bean %s\n", fieldName, beanName)
 		// if this field is populated, continue
 		if con.populatedSingletonField[beanName][fieldName] {
 			continue
@@ -221,19 +272,16 @@ func (con *Container) populateSingleton(beanName string) {
 		var tag = beanType.Field(i).Tag
 
 		var dataValue = con.getBaseTypeDataByTag(tag, fieldType)
-		log.Printf("populateSingleton: get dataValue as %+v from getBaseTypeDataByTag\n", dataValue)
-		// TODO
-		// unexported needed to use unsafe.Pointer
-		// or for struct such as abean, use the func SetAbean()
+		log.Printf("populateSingleton: get dataValue as '%+v' from getBaseTypeDataByTag\n", dataValue)
+
 		if fieldValue.CanSet() {
-			log.Printf("populateSingleton: populate field %+v's type is %s \n", fieldName, fieldValue.Type())
-			// if fieldValue.Type().Kind() == reflect.Ptr {
-			// 	fieldValue.Set(dataValue.Elem())
-			// 	// fmt.Println(dataValue.Elem())
-			// } else {
-			// 	fieldValue.Set(dataValue)
-			// }
+			log.Printf("populateSingleton: populate field '%+v' with type of '%s' \n", fieldName, fieldValue.Type())
+
 			fieldValue.Set(dataValue)
+		} else {
+			// TODO
+			// unexported needed to use unsafe.Pointer
+			// or for struct such as abean, use the func SetAbean()
 		}
 
 	}
@@ -256,14 +304,16 @@ func ifFieldUnExported(fieldName string) bool {
 // this func is used for transfor string type data to BaseType data
 // for example, "100"==>100 of int
 func (con *Container) getBaseTypeDataByTag(tag reflect.StructTag, fieldType reflect.Type) reflect.Value {
-	log.Printf("getBaseTypeDataByTag: get data from tag %s by the type of %s\n", tag, fieldType)
+	log.Printf("getBaseTypeDataByTag: get data from tag '%s' by the type of '%s'\n", tag, fieldType)
 	var empty = reflect.Zero(fieldType)
 	if fieldType.Kind() == reflect.Ptr {
 		empty = reflect.New(fieldType.Elem())
 	}
+
 	if tag == "" {
 		return empty
 	}
+
 	var data = tag.Get("data")
 
 	if (len(data) == 0 || data == "") && (fieldType.Kind() != reflect.Ptr) {
@@ -277,7 +327,7 @@ func (con *Container) getBaseTypeDataByTag(tag reflect.StructTag, fieldType refl
 			log.Println("convert error: ", err)
 			return empty
 		}
-		log.Printf("getBaseTypeDataByTag: convert data %s to int\n", data)
+		log.Printf("getBaseTypeDataByTag: convert data '%s' to int\n", data)
 		return reflect.ValueOf(d)
 	// case reflect.Uint:
 	case reflect.Float32:
@@ -286,7 +336,7 @@ func (con *Container) getBaseTypeDataByTag(tag reflect.StructTag, fieldType refl
 			log.Println("convert error: ", err)
 			return empty
 		}
-		log.Printf("getBaseTypeDataByTag: convert data %s to float32\n", data)
+		log.Printf("getBaseTypeDataByTag: convert data '%s' to float32\n", data)
 		return reflect.ValueOf(float32(d))
 	case reflect.Float64:
 		var d, err = strconv.ParseFloat(data, 64)
@@ -294,10 +344,10 @@ func (con *Container) getBaseTypeDataByTag(tag reflect.StructTag, fieldType refl
 			log.Println("convert error: ", err)
 			return empty
 		}
-		log.Printf("getBaseTypeDataByTag: convert data %s to float64\n", data)
+		log.Printf("getBaseTypeDataByTag: convert data '%s' to float64\n", data)
 		return reflect.ValueOf(d)
 	case reflect.String:
-		log.Printf("getBaseTypeDataByTag: convert data %s to string, actually convertion isn't needed\n", data)
+		log.Printf("getBaseTypeDataByTag: convert data '%s' to string, actually convertion isn't needed\n", data)
 		return reflect.ValueOf(data)
 	case reflect.Bool:
 		var d, err = strconv.ParseBool(data)
@@ -305,7 +355,7 @@ func (con *Container) getBaseTypeDataByTag(tag reflect.StructTag, fieldType refl
 			log.Println("convert error: ", err)
 			return reflect.New(fieldType)
 		}
-		log.Printf("getBaseTypeDataByTag: convert data %s to bool\n", data)
+		log.Printf("getBaseTypeDataByTag: convert data '%s' to bool\n", data)
 		return reflect.ValueOf(d)
 	case reflect.Ptr:
 		if fieldType.Elem().Kind() == reflect.Struct {
@@ -324,16 +374,18 @@ func (con *Container) getBaseTypeDataByTag(tag reflect.StructTag, fieldType refl
 					beanName = string(tmp)
 				}
 			}
-			log.Printf("getBaseTypeDataByTag: get beanName from resource %s, fieldName %s or type %s\n", tag.Get("resource"), fieldType.Name(), fieldType.Elem().Name())
+			log.Printf("getBaseTypeDataByTag: get beanName from resource '%s', fieldName '%s' or type '%s'\n", tag.Get("resource"), fieldType.Name(), fieldType.Elem().Name())
+			// bean, err := con.getSingletonBeanByName(beanName)
 			bean, err := con.getSingletonBeanByName(beanName)
-			if err != nil {
-				log.Errorln("convert error: ", err)
-				return empty
+			if err == nil || err == ErrBeanLoadNotTotal {
+				// log.Errorln("convert error: ", err)
+				// con.populateSingleton(beanName)
+				var btype = reflect.TypeOf(bean)
+				if btype.Kind() == reflect.Ptr && btype.Elem().Kind() == fieldType.Elem().Kind() {
+					return reflect.ValueOf(bean)
+				}
 			}
-			var btype = reflect.TypeOf(bean)
-			if btype.Kind() == reflect.Ptr && btype.Elem().Kind() == fieldType.Elem().Kind() {
-				return reflect.ValueOf(bean)
-			}
+
 		}
 	}
 	return empty
