@@ -8,19 +8,41 @@ import (
 
 type Abean struct {
 	B    *Bbean `resource:"b"`
-	Name string `data:"hsp"`
+	Name string `data:"hahahha"`
 
 	C int
 }
 type Bbean struct {
-	Name string `data:"wy"`
+	Name string `data:"hehehhe"`
 }
 
+func TestInjector(t *testing.T) {
+	type A_struct struct {
+		Name string
+	}
+	type B_struct struct {
+		a *A_struct
+	}
+	type Eface struct {
+		Type *struct{}
+		Data unsafe.Pointer
+	}
+	var b = &B_struct{}
+	var bintr = (interface{})(b)
+	var a = &A_struct{
+		Name: "hsp",
+	}
+	var ainter = (interface{})(a)
+	var aptr = (*Eface)(unsafe.Pointer(&ainter)).Data
+	var beface_ptr = (*Eface)(unsafe.Pointer(&bintr)).Data
+	InjectStructPtr(unsafe.Pointer(beface_ptr), aptr)
+	fmt.Println(b.a)
+}
 func TestGetsingleton(t *testing.T) {
 	var con = NewContainer()
-	// con.addSingleton("b", func() interface{} {
-	// 	return &Bbean{}
-	// })
+	con.addSingleton("b", func() interface{} {
+		return &Bbean{}
+	})
 	con.addSingleton("a", func() interface{} {
 		return &Abean{}
 	})
